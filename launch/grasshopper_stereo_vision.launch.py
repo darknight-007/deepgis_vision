@@ -4,16 +4,20 @@ Launch file for Grasshopper3 stereo camera AI vision processing.
 
 This launch configuration:
 1. Optionally starts the Grasshopper3 stereo cameras
-2. Runs AI detection on the right camera
+2. Runs AI detection on left and/or right camera
 3. Provides visualization of detection results
 
 Usage:
-    # Just vision processing (cameras already running):
+    # Both cameras (default):
     ros2 launch deepgis_vision grasshopper_stereo_vision.launch.py
 
     # With camera launch:
     ros2 launch deepgis_vision grasshopper_stereo_vision.launch.py \
         start_cameras:=true
+
+    # Right camera only:
+    ros2 launch deepgis_vision grasshopper_stereo_vision.launch.py \
+        enable_left:=false
 
     # Custom AI server:
     ros2 launch deepgis_vision grasshopper_stereo_vision.launch.py \
@@ -59,9 +63,14 @@ def generate_launch_description():
             description='URL of the AI server (Grounding DINO)'
         ),
         DeclareLaunchArgument(
-            'camera_topic',
-            default_value='/stereo/right/image_raw',
-            description='Camera topic for detection'
+            'enable_left',
+            default_value='true',
+            description='Enable detection on left camera'
+        ),
+        DeclareLaunchArgument(
+            'enable_right',
+            default_value='true',
+            description='Enable detection on right camera'
         ),
         DeclareLaunchArgument(
             'prompt',
@@ -71,12 +80,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_fps',
             default_value='0.2',
-            description='Maximum detection FPS'
+            description='Maximum detection FPS per camera'
         ),
         DeclareLaunchArgument(
             'enable_visualizer',
             default_value='true',
-            description='Enable visualization node'
+            description='Enable visualization nodes'
         ),
     ]
     
@@ -95,37 +104,75 @@ def generate_launch_description():
         )
         nodes.append(camera_launch)
     
-    # Grounding DINO detection node
-    detection_node = Node(
+    # Left camera detection node
+    left_detection_node = Node(
         package='deepgis_vision',
         executable='grounding_dino_node.py',
-        name='grounding_dino_node',
+        name='grounding_dino_left',
+        namespace='stereo/left',
         output='screen',
+        condition=IfCondition(LaunchConfiguration('enable_left')),
         parameters=[
             config_file,
             {
                 'ai_server_url': LaunchConfiguration('ai_server_url'),
-                'camera_topic': LaunchConfiguration('camera_topic'),
+                'camera_topic': '/stereo/left/image_raw',
                 'prompt': LaunchConfiguration('prompt'),
                 'max_fps': LaunchConfiguration('max_fps'),
             }
         ]
     )
-    nodes.append(detection_node)
+    nodes.append(left_detection_node)
     
-    # Visualizer node
-    visualizer_node = Node(
+    # Right camera detection node
+    right_detection_node = Node(
+        package='deepgis_vision',
+        executable='grounding_dino_node.py',
+        name='grounding_dino_right',
+        namespace='stereo/right',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('enable_right')),
+        parameters=[
+            config_file,
+            {
+                'ai_server_url': LaunchConfiguration('ai_server_url'),
+                'camera_topic': '/stereo/right/image_raw',
+                'prompt': LaunchConfiguration('prompt'),
+                'max_fps': LaunchConfiguration('max_fps'),
+            }
+        ]
+    )
+    nodes.append(right_detection_node)
+    
+    # Left camera visualizer
+    left_visualizer_node = Node(
         package='deepgis_vision',
         executable='detection_visualizer.py',
-        name='detection_visualizer',
+        name='detection_visualizer_left',
+        namespace='stereo/left',
         output='screen',
-        condition=IfCondition(LaunchConfiguration('enable_visualizer')),
+        condition=IfCondition(LaunchConfiguration('enable_left')),
         parameters=[{
-            'image_topic': LaunchConfiguration('camera_topic'),
-            'detection_topic': '/grounding_dino_node/detections',
+            'image_topic': '/stereo/left/image_raw',
+            'detection_topic': '/stereo/left/grounding_dino_left/detections',
         }]
     )
-    nodes.append(visualizer_node)
+    nodes.append(left_visualizer_node)
+    
+    # Right camera visualizer
+    right_visualizer_node = Node(
+        package='deepgis_vision',
+        executable='detection_visualizer.py',
+        name='detection_visualizer_right',
+        namespace='stereo/right',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('enable_right')),
+        parameters=[{
+            'image_topic': '/stereo/right/image_raw',
+            'detection_topic': '/stereo/right/grounding_dino_right/detections',
+        }]
+    )
+    nodes.append(right_visualizer_node)
     
     return LaunchDescription(args + nodes)
 
