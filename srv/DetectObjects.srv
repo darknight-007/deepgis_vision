@@ -1,0 +1,17 @@
+# Service to request object detection on demand
+# Can be used for single-shot detection or batch processing
+
+# Request
+sensor_msgs/Image image
+string prompt              # Text prompt for open-vocabulary detection
+float32 confidence_threshold  # Default: 0.3
+float32 nms_threshold         # Default: 0.5
+string model_name             # "grounding_dino", "yolo", "sam" (empty = default)
+bool return_masks             # Whether to return segmentation masks
+---
+# Response
+bool success
+string message
+deepgis_vision/DetectionArray detections
+float32 inference_time_ms
+

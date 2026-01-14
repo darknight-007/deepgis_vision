@@ -1,0 +1,16 @@
+# Service to update the detection prompt at runtime
+# Allows dynamic changing of what objects to detect
+
+# Request
+string prompt              # New text prompt (e.g., "person . car . tree")
+float32 confidence_threshold  # New confidence threshold (0 = keep current)
+float32 nms_threshold         # New NMS threshold (0 = keep current)
+bool clear_history            # Clear detection history
+---
+# Response
+bool success
+string message
+string current_prompt
+float32 current_confidence_threshold
+float32 current_nms_threshold
+

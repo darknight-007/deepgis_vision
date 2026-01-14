@@ -1,0 +1,57 @@
+# Multi-Model AI Vision Node Configuration
+# Supports Grounding DINO, YOLO, SAM, and custom models
+# https://github.com/Earth-Innovation-Hub/deepgis-xr
+
+ai_vision_node:
+  ros__parameters:
+    # Primary AI Server (Grounding DINO by default)
+    primary_server_url: "http://192.168.0.232:5000"
+    primary_server_type: "grounding_dino"  # grounding_dino, yolo, sam
+    
+    # Fallback AI Server (optional)
+    # Will be used if primary server becomes unavailable
+    fallback_server_url: ""
+    fallback_server_type: "yolo"
+    
+    # API Authentication (optional)
+    api_key: ""
+    
+    # Camera Topics to Subscribe
+    # Supports multiple cameras simultaneously
+    camera_topics:
+      - "/stereo/right/image_raw"
+      # - "/stereo/left/image_raw"
+      # - "/camera/color/image_raw"
+    use_compressed: false
+    
+    # Detection Parameters
+    prompt: "person . car . tree . building"
+    confidence_threshold: 0.3
+    box_threshold: 0.35
+    text_threshold: 0.25
+    
+    # Performance Settings
+    max_fps: 0.2  # ~1 detection every 5s
+    resize_width: 640
+    resize_height: 480
+    jpeg_quality: 85
+    request_timeout: 5.0
+    async_processing: true
+    queue_size: 2
+    
+    # Output Settings
+    publish_annotated_image: true
+    publish_json: true
+
+# Detection Visualizer Configuration
+detection_visualizer:
+  ros__parameters:
+    image_topic: "/stereo/right/image_raw"
+    detection_topic: "/ai_vision_node/detections"
+    show_confidence: true
+    show_fps: true
+    show_latency: true
+    box_thickness: 2
+    font_scale: 0.5
+    history_length: 30
+

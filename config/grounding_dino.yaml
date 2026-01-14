@@ -1,0 +1,48 @@
+# Grounding DINO Vision Node Configuration
+# Compatible with DeepGIS-XR AI Server Architecture
+# https://github.com/Earth-Innovation-Hub/deepgis-xr
+
+grounding_dino_node:
+  ros__parameters:
+    # AI Server Configuration
+    # The Grounding DINO server URL - can be local or remote
+    ai_server_url: "http://192.168.0.232:5000"
+    detection_endpoint: "/api/predict"
+    health_endpoint: "/health"
+    api_key: ""  # Optional API key for authenticated servers
+    
+    # Camera Topic Configuration
+    # For Grasshopper stereo cameras:
+    #   Left:  /stereo/left/image_raw
+    #   Right: /stereo/right/image_raw
+    camera_topic: "/stereo/right/image_raw"
+    use_compressed: false
+    image_transport: "raw"
+    
+    # Detection Parameters
+    # Prompt uses "." as separator for multiple classes
+    # Example: "person . car . tree . building . road"
+    prompt: "person . vehicle . tree . building"
+    confidence_threshold: 0.3
+    nms_threshold: 0.5
+    box_threshold: 0.35   # Grounding DINO specific
+    text_threshold: 0.25  # Grounding DINO specific
+    
+    # Performance Tuning
+    max_fps: 0.2            # Limit detection rate to ~1 detection every 5s
+    resize_width: 640       # Resize before sending (0 = no resize)
+    resize_height: 480
+    jpeg_quality: 85        # JPEG compression quality (1-100)
+    request_timeout: 5.0    # API request timeout in seconds
+    async_processing: true  # Use async processing queue
+    queue_size: 2           # Max pending requests
+    
+    # Health Monitoring
+    health_check_interval: 10.0  # Seconds between health checks
+    max_consecutive_failures: 5  # Failures before marking disconnected
+    retry_delay: 2.0             # Seconds between retries
+    
+    # Output Configuration
+    publish_annotated_image: true
+    publish_detections: true
+
