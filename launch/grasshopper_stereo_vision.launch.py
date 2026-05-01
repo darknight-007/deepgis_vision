@@ -98,7 +98,7 @@ def generate_launch_description():
     if has_spinnaker:
         camera_launch = IncludeLaunchDescription(
             PythonLaunchDescriptionSource(
-                os.path.join(spinnaker_share, 'launch', 'grasshopper_stereo.launch.py')
+                os.path.join(spinnaker_share, 'launch', 'grasshopper_stereo_min.launch.py')
             ),
             condition=IfCondition(LaunchConfiguration('start_cameras'))
         )

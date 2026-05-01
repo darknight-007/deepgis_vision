@@ -272,7 +272,10 @@ The package is pre-configured for FLIR Grasshopper3 stereo cameras:
 
 ```bash
 # Start cameras (if using spinnaker_camera_driver)
-ros2 launch spinnaker_camera_driver grasshopper_stereo.launch.py
+ros2 launch spinnaker_camera_driver grasshopper_stereo_min.launch.py \
+    left_serial:=22312692 \
+    right_serial:=22312674 \
+    parameter_file:=grasshopper.yaml
 
 # Start AI detection on right camera
 ros2 launch deepgis_vision grounding_dino.launch.py \
