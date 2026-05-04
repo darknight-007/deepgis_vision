@@ -29,6 +29,7 @@ install(PROGRAMS
   scripts/grounding_dino_node.py
   scripts/ai_vision_node.py
   scripts/detection_visualizer.py
+  scripts/coral_model_benchmark.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

@@ -1,0 +1,59 @@
+# Coral Edge TPU on-device perception for the earth-rover stereo pair.
+# Used by launch/coral_perception.launch.py.
+
+ai_vision_node:
+  ros__parameters:
+    # Use on-device Coral inference (no remote AI server).
+    primary_server_url: "local://coral"
+    primary_server_type: "coral"
+    fallback_server_url: ""
+    fallback_server_type: "yolo"
+    api_key: ""
+
+    # Stereo sources from the FLIR Grasshopper3 pair.
+    camera_topics:
+      - "/stereo/left/image_raw"
+      - "/stereo/right/image_raw"
+    use_compressed: false
+
+    # MobileDet runs on full-res frames; CoralClient handles the resize to
+    # 320x320 internally, so we leave global resize off.
+    resize_width: 0
+    resize_height: 0
+    jpeg_quality: 85
+
+    # Per-camera throttle. With 2 cameras at 30 FPS each, the Coral USB has
+    # plenty of headroom (~12 ms/inference -> ~80 FPS budget total).
+    max_fps: 15.0
+
+    # Local inference; request_timeout is unused but kept for API symmetry.
+    request_timeout: 5.0
+    async_processing: true
+    queue_size: 4
+
+    publish_annotated_image: true
+    publish_json: true
+
+    # Coral on-device parameters.
+    # Defaults point at the SSDLite MobileDet COCO model downloaded during
+    # Coral setup; override on the launch command line if you have a custom
+    # *_edgetpu.tflite (e.g. a rocks detector).
+    coral_model_path: ""
+    coral_labels_path: ""
+    coral_score_threshold: 0.4
+    # JSON/detection field + optional per-box suffix in annotations.
+    coral_model_name_tag: "MobileDet"
+
+    # Per-camera left/right hue separation: palette index shift per topic (stride 5).
+    coral_palette_shift: 0
+    coral_per_camera_palette: true
+    coral_camera_palette_stride: 5
+
+    # Annotated-image title (empty ⇒ derived from coral_model_path basename).
+    coral_model_display_name: ""
+
+    # Unused for the Coral backend but required to be declared.
+    prompt: ""
+    confidence_threshold: 0.4
+    box_threshold: 0.35
+    text_threshold: 0.25

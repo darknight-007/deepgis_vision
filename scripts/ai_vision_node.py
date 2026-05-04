@@ -23,6 +23,8 @@ import cv2
 import numpy as np
 from cv_bridge import CvBridge, CvBridgeError
 
+import os
+import zlib
 import requests
 import base64
 import json
@@ -34,6 +36,125 @@ from typing import List, Dict, Any, Optional, Tuple
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field, asdict
 from enum import Enum
+
+
+def _json_default(obj):
+    """JSON encoder fallback for non-serializable types we emit (e.g. mask_rle bytes)."""
+    if isinstance(obj, (bytes, bytearray)):
+        return base64.b64encode(bytes(obj)).decode('ascii') if obj else ''
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+# Expanded BGR palette so per-camera shifts stay visually distinct (left vs right).
+CLASS_COLOR_PALETTE: Tuple[Tuple[int, int, int], ...] = (
+    (0, 255, 0), (0, 180, 255), (255, 128, 0), (255, 0, 255),
+    (255, 255, 0), (0, 140, 255), (180, 105, 255), (128, 255, 128),
+    (255, 80, 80), (80, 200, 240), (200, 200, 0), (0, 255, 190),
+    (255, 0, 127), (127, 255, 0), (210, 0, 210), (0, 255, 255),
+    (170, 120, 50), (100, 100, 255), (255, 180, 100), (100, 255, 180),
+)
+
+
+def _palette_color_bgr(class_label: str, palette_shift: int) -> Tuple[int, int, int]:
+    """Stable color per label; `palette_shift` rotates the palette (different cameras/models)."""
+    n = len(CLASS_COLOR_PALETTE)
+    idx = (zlib.crc32(class_label.encode('utf-8')) % n + int(palette_shift)) % n
+    return CLASS_COLOR_PALETTE[idx]
+
+
+def _draw_dashed_line(img, p1, p2, color, thickness: int = 2, dash: int = 10, gap: int = 6):
+    """Straight dashed segment."""
+    x1, y1 = float(p1[0]), float(p1[1])
+    x2, y2 = float(p2[0]), float(p2[1])
+    dist = float(np.hypot(x2 - x1, y2 - y1))
+    if dist < 1e-3:
+        return
+    ux, uy = (x2 - x1) / dist, (y2 - y1) / dist
+    t = 0.0
+    draw_on = True
+    while t < dist:
+        seg = dash if draw_on else gap
+        t_next = min(t + seg, dist)
+        if draw_on:
+            cv2.line(
+                img,
+                (int(x1 + ux * t), int(y1 + uy * t)),
+                (int(x1 + ux * t_next), int(y1 + uy * t_next)),
+                color, thickness, cv2.LINE_AA,
+            )
+        t = t_next
+        draw_on = not draw_on
+
+
+def draw_detection_overlay(
+    image: np.ndarray,
+    detections: List[Dict],
+    *,
+    palette_shift: int = 0,
+    latency_ms: float = 0.0,
+    header_top: str = '',
+    header_sub: str = '',
+    dashed_boxes: bool = False,
+    box_thickness: int = 2,
+) -> np.ndarray:
+    """
+    Draw detection boxes + labels on a BGR image (shared by the ROS node and
+    offline benchmarking). Bounding boxes must use *_norm fields (0–1 range).
+    """
+    h, w = image.shape[:2]
+
+    for det in detections:
+        label = det.get('class_name', 'unknown')
+        conf = det.get('confidence', 0.0)
+        color = _palette_color_bgr(label, palette_shift)
+
+        x1 = int(det.get('bbox_x_norm', 0) * w)
+        y1 = int(det.get('bbox_y_norm', 0) * h)
+        x2 = int((det.get('bbox_x_norm', 0) + det.get('bbox_width_norm', 0)) * w)
+        y2 = int((det.get('bbox_y_norm', 0) + det.get('bbox_height_norm', 0)) * h)
+
+        if dashed_boxes:
+            _draw_dashed_line(image, (x1, y1), (x2, y1), color, box_thickness)
+            _draw_dashed_line(image, (x2, y1), (x2, y2), color, box_thickness)
+            _draw_dashed_line(image, (x2, y2), (x1, y2), color, box_thickness)
+            _draw_dashed_line(image, (x1, y2), (x1, y1), color, box_thickness)
+        else:
+            cv2.rectangle(image, (x1, y1), (x2, y2), color, box_thickness)
+
+        mn = det.get('model_name', '')
+        suffix = f" [{mn}]" if mn else ''
+        text = f'{label}: {conf:.2f}{suffix}'
+        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+        label_y = max(y1, th + 8)
+        cv2.rectangle(image, (x1, label_y - th - 8), (x1 + tw + 4, label_y), color, -1)
+        cv2.putText(
+            image, text, (x1 + 2, label_y - 4),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA,
+        )
+
+    lines: List[str] = []
+    if header_top.strip():
+        lines.append(header_top)
+    if header_sub.strip():
+        lines.append(header_sub)
+    elif latency_ms > 0:
+        lines.append(
+            f'latency {latency_ms:.1f} ms  ({1000.0 / max(latency_ms, 0.001):.0f} FPS)'
+        )
+
+    y0 = 22
+    for i, ln in enumerate(lines):
+        yy = y0 + i * 22
+        cv2.putText(image, ln, (10, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(image, ln, (10, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 1, cv2.LINE_AA)
+
+    return image
 
 
 class ModelType(Enum):
@@ -93,7 +214,16 @@ class AIServerClient(ABC):
     def detect(self, image_base64: str, prompt: str, **kwargs) -> List[Detection]:
         """Perform detection on image."""
         pass
-    
+
+    def detect_image(self, cv_image: np.ndarray, prompt: str = "", **kwargs) -> List[Detection]:
+        """Detect on a BGR cv2 image. Default impl JPEG-encodes and calls detect()."""
+        encode_params = [cv2.IMWRITE_JPEG_QUALITY, kwargs.pop('jpeg_quality', 85)]
+        ok, buffer = cv2.imencode('.jpg', cv_image, encode_params)
+        if not ok:
+            return []
+        image_base64 = base64.b64encode(buffer).decode('utf-8')
+        return self.detect(image_base64, prompt=prompt, **kwargs)
+
     def health_check(self) -> bool:
         """Check server health."""
         try:
@@ -299,6 +429,136 @@ class SAMClient(AIServerClient):
             return []
 
 
+class CoralClient(AIServerClient):
+    """
+    On-device Google Coral Edge TPU detector (no HTTP).
+
+    Loads a pre-compiled `*_edgetpu.tflite` SSD-style detector with built-in
+    NMS post-processing (e.g. SSDLite MobileDet, SSD MobileNet v2). Inference
+    runs in-process via pycoral; ROS callbacks hand cv_images straight in
+    through `detect_image`, skipping the JPEG/base64 round-trip.
+    """
+
+    def __init__(
+        self,
+        config: AIServerConfig,
+        logger,
+        model_path: str,
+        labels_path: str = '',
+        score_threshold: float = 0.4,
+        model_name_tag: str = 'coral',
+    ):
+        super().__init__(config, logger)
+        try:
+            from pycoral.utils.edgetpu import make_interpreter, list_edge_tpus
+            from pycoral.utils.dataset import read_label_file
+            from pycoral.adapters import common as coral_common
+            from pycoral.adapters import detect as coral_detect
+        except ImportError as e:
+            raise RuntimeError(
+                "pycoral / tflite_runtime not importable. Install via the "
+                "feranick wheels (cp312 linux_x86_64) and `libedgetpu1-std` deb."
+            ) from e
+
+        if not model_path or not os.path.exists(model_path):
+            raise FileNotFoundError(f"Coral model not found at {model_path!r}")
+
+        tpus = list_edge_tpus()
+        if not tpus:
+            raise RuntimeError("No Edge TPU detected. Replug the Coral USB stick.")
+        logger.info(f"CoralClient: {len(tpus)} Edge TPU(s) detected: {tpus}")
+
+        self._common = coral_common
+        self._detect = coral_detect
+        self._interp = make_interpreter(model_path)
+        self._interp.allocate_tensors()
+        self._in_w, self._in_h = coral_common.input_size(self._interp)
+
+        if labels_path and os.path.exists(labels_path):
+            self.labels = read_label_file(labels_path)
+        else:
+            self.labels = {}
+            if labels_path:
+                logger.warning(f"CoralClient: labels file not found: {labels_path!r}")
+
+        self.score_threshold = float(score_threshold)
+        self._lock = Lock()
+        self.is_healthy = True
+        self.model_path = model_path
+        self.model_name_tag = (model_name_tag or 'coral').strip()
+
+        logger.info(
+            f"CoralClient ready: model={os.path.basename(model_path)} "
+            f"input={self._in_w}x{self._in_h} score_thr={self.score_threshold} "
+            f"classes={len(self.labels)}"
+        )
+
+    def health_check(self) -> bool:
+        return self.is_healthy
+
+    def detect(self, image_base64: str, prompt: str = "", **kwargs) -> List[Detection]:
+        """HTTP-style entry kept for API symmetry; decodes then delegates."""
+        try:
+            img_bytes = base64.b64decode(image_base64)
+            np_arr = np.frombuffer(img_bytes, np.uint8)
+            cv_image = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+            if cv_image is None:
+                return []
+            return self.detect_image(cv_image, prompt=prompt, **kwargs)
+        except Exception as e:
+            self.logger.error(f"Coral detect (base64 path) error: {e}")
+            return []
+
+    def detect_image(self, cv_image: np.ndarray, prompt: str = "", **kwargs) -> List[Detection]:
+        if cv_image is None or cv_image.size == 0:
+            return []
+
+        score_thr = float(kwargs.get('confidence', self.score_threshold))
+
+        h, w = cv_image.shape[:2]
+        rgb = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(rgb, (self._in_w, self._in_h), interpolation=cv2.INTER_LINEAR)
+
+        start = time.time()
+        with self._lock:
+            self._common.set_input(self._interp, resized)
+            self._interp.invoke()
+            objs = self._detect.get_objects(
+                self._interp,
+                score_threshold=score_thr,
+                image_scale=(self._in_w / max(w, 1), self._in_h / max(h, 1)),
+            )
+        self.last_latency_ms = (time.time() - start) * 1000.0
+
+        detections: List[Detection] = []
+        for i, o in enumerate(objs):
+            bb = o.bbox
+            label = self.labels.get(o.id, str(o.id))
+            xmin = max(0.0, float(bb.xmin))
+            ymin = max(0.0, float(bb.ymin))
+            xmax = min(float(w), float(bb.xmax))
+            ymax = min(float(h), float(bb.ymax))
+            bw = max(0.0, xmax - xmin)
+            bh = max(0.0, ymax - ymin)
+            detections.append(Detection(
+                id=i,
+                class_name=label,
+                class_id=int(o.id),
+                confidence=float(o.score),
+                bbox_x=xmin,
+                bbox_y=ymin,
+                bbox_width=bw,
+                bbox_height=bh,
+                bbox_x_norm=xmin / max(w, 1),
+                bbox_y_norm=ymin / max(h, 1),
+                bbox_width_norm=bw / max(w, 1),
+                bbox_height_norm=bh / max(h, 1),
+                mask_rle=b'',
+                model_name=self.model_name_tag,
+            ))
+        return detections
+
+
 class AIVisionNode(Node):
     """
     Multi-model AI Vision Node for ROS2.
@@ -321,7 +581,7 @@ class AIVisionNode(Node):
         # Initialize components
         self.cv_bridge = CvBridge()
         self.data_lock = Lock()
-        self.clients: Dict[str, AIServerClient] = {}
+        self.ai_clients: Dict[str, AIServerClient] = {}
         self.active_client: Optional[AIServerClient] = None
         
         # Statistics
@@ -345,6 +605,8 @@ class AIVisionNode(Node):
         # Initialize AI clients
         self._init_clients()
 
+        self._annotate_model_title = self._compose_annotate_title()
+
         # Setup ROS interfaces
         self._setup_ros_interfaces()
 
@@ -362,6 +624,19 @@ class AIVisionNode(Node):
         self._health_check_all()
 
         self._log_startup()
+
+    @staticmethod
+    def _guess_model_title(model_path: str) -> str:
+        base = os.path.basename(model_path or '').replace(
+            '_edgetpu.tflite', '').replace('.tflite', '')
+        return base or 'detector'
+
+    def _compose_annotate_title(self) -> str:
+        if self.coral_model_display_name:
+            return self.coral_model_display_name
+        if self.primary_server_type == 'coral':
+            return self._guess_model_title(self.coral_model_path)
+        return str(self.primary_server_type)
 
     def _declare_parameters(self):
         """Declare all node parameters."""
@@ -395,6 +670,18 @@ class AIVisionNode(Node):
         self.declare_parameter('publish_annotated_image', True)
         self.declare_parameter('publish_json', True)
 
+        # Coral on-device parameters (only used when *_server_type == 'coral')
+        self.declare_parameter('coral_model_path', '')
+        self.declare_parameter('coral_labels_path', '')
+        self.declare_parameter('coral_score_threshold', 0.4)
+        self.declare_parameter('coral_model_name_tag', 'coral')
+        # Per-camera color shift: left vs right use different palette rotations.
+        self.declare_parameter('coral_palette_shift', 0)
+        self.declare_parameter('coral_per_camera_palette', True)
+        self.declare_parameter('coral_camera_palette_stride', 5)
+        # Shown on annotated image header (empty => derived from model filename).
+        self.declare_parameter('coral_model_display_name', '')
+
     def _get_parameters(self):
         """Get all parameter values."""
         self.primary_server_url = self.get_parameter('primary_server_url').value
@@ -422,43 +709,77 @@ class AIVisionNode(Node):
         self.publish_annotated = self.get_parameter('publish_annotated_image').value
         self.publish_json = self.get_parameter('publish_json').value
 
+        self.coral_model_path = self.get_parameter('coral_model_path').value
+        self.coral_labels_path = self.get_parameter('coral_labels_path').value
+        self.coral_score_threshold = self.get_parameter('coral_score_threshold').value
+        self.coral_model_name_tag = self.get_parameter('coral_model_name_tag').value
+        self.coral_palette_shift = int(self.get_parameter('coral_palette_shift').value)
+        self.coral_per_camera_palette = bool(self.get_parameter('coral_per_camera_palette').value)
+        self.coral_camera_palette_stride = int(self.get_parameter('coral_camera_palette_stride').value)
+        self.coral_model_display_name = (self.get_parameter('coral_model_display_name').value or '').strip()
+
+        # Per-topic palette shift for annotated images (left ≠ right colors).
+        npal = len(CLASS_COLOR_PALETTE)
+        self._palette_shift_by_topic: Dict[str, int] = {}
+        for i, t in enumerate(self.camera_topics):
+            stride = self.coral_camera_palette_stride if self.coral_per_camera_palette else 0
+            self._palette_shift_by_topic[t] = (
+                self.coral_palette_shift + i * stride
+            ) % npal
+
     def _init_clients(self):
         """Initialize AI server clients."""
         client_classes = {
             'grounding_dino': GroundingDINOClient,
             'yolo': YOLOClient,
             'sam': SAMClient,
+            'coral': CoralClient,
         }
-        
-        # Primary server
-        if self.primary_server_url:
+
+        def _make_client(name: str, server_type: str, server_url: str, priority: int):
+            try:
+                model_type = ModelType(server_type) if server_type != 'coral' else ModelType.CUSTOM
+            except ValueError:
+                model_type = ModelType.CUSTOM
             config = AIServerConfig(
-                name='primary',
-                url=self.primary_server_url,
-                model_type=ModelType(self.primary_server_type),
+                name=name,
+                url=server_url or 'local://coral',
+                model_type=model_type,
                 api_key=self.api_key,
                 timeout=self.request_timeout,
-                priority=0,
+                priority=priority,
             )
-            client_class = client_classes.get(self.primary_server_type, GroundingDINOClient)
-            self.clients['primary'] = client_class(config, self.get_logger())
-        
-        # Fallback server
-        if self.fallback_server_url:
-            config = AIServerConfig(
-                name='fallback',
-                url=self.fallback_server_url,
-                model_type=ModelType(self.fallback_server_type),
-                api_key=self.api_key,
-                timeout=self.request_timeout,
-                priority=1,
-            )
-            client_class = client_classes.get(self.fallback_server_type, YOLOClient)
-            self.clients['fallback'] = client_class(config, self.get_logger())
-        
-        # Set active client
-        if 'primary' in self.clients:
-            self.active_client = self.clients['primary']
+            client_class = client_classes.get(server_type, GroundingDINOClient)
+
+            if server_type == 'coral':
+                return CoralClient(
+                    config,
+                    self.get_logger(),
+                    model_path=self.coral_model_path,
+                    labels_path=self.coral_labels_path,
+                    score_threshold=self.coral_score_threshold,
+                    model_name_tag=self.coral_model_name_tag,
+                )
+            return client_class(config, self.get_logger())
+
+        if self.primary_server_url or self.primary_server_type == 'coral':
+            try:
+                self.ai_clients['primary'] = _make_client(
+                    'primary', self.primary_server_type, self.primary_server_url, 0,
+                )
+            except Exception as e:
+                self.get_logger().error(f"Failed to init primary client ({self.primary_server_type}): {e}")
+
+        if self.fallback_server_url or self.fallback_server_type == 'coral':
+            try:
+                self.ai_clients['fallback'] = _make_client(
+                    'fallback', self.fallback_server_type, self.fallback_server_url, 1,
+                )
+            except Exception as e:
+                self.get_logger().warning(f"Failed to init fallback client ({self.fallback_server_type}): {e}")
+
+        if 'primary' in self.ai_clients:
+            self.active_client = self.ai_clients['primary']
 
     def _setup_ros_interfaces(self):
         """Setup ROS subscribers and publishers."""
@@ -468,8 +789,10 @@ class AIVisionNode(Node):
             depth=1,
             durability=DurabilityPolicy.VOLATILE
         )
-        
-        # Subscribe to camera topics
+
+        self._topic_names: Dict[str, str] = {t: self._derive_camera_name(t) for t in self.camera_topics}
+        self.last_detection_time_per_topic: Dict[str, float] = {t: 0.0 for t in self.camera_topics}
+
         self.image_subs = []
         for topic in self.camera_topics:
             if self.use_compressed:
@@ -487,16 +810,31 @@ class AIVisionNode(Node):
                     qos_profile
                 )
             self.image_subs.append(sub)
-        
-        # Dynamic prompt update
+
         self.prompt_sub = self.create_subscription(
             String, '~/set_prompt', self._prompt_callback, 10
         )
-        
-        # Publishers
+
         self.detection_pub = self.create_publisher(String, '~/detections', 10)
-        self.annotated_pub = self.create_publisher(Image, '~/annotated_image', 10)
         self.status_pub = self.create_publisher(String, '~/status', 10)
+
+        # Per-camera annotated image publishers, e.g. ~/left/annotated_image
+        self.annotated_pubs: Dict[str, Any] = {}
+        for topic, name in self._topic_names.items():
+            self.annotated_pubs[topic] = self.create_publisher(Image, f'~/{name}/annotated_image', 10)
+
+        # Single fallback publisher kept for backward-compat with existing tooling
+        self.annotated_pub = self.create_publisher(Image, '~/annotated_image', 10)
+
+    @staticmethod
+    def _derive_camera_name(topic: str) -> str:
+        """`/stereo/left/image_raw` -> `left`, `/camera/image_raw` -> `camera`."""
+        parts = [p for p in topic.strip('/').split('/') if p]
+        if not parts:
+            return 'cam'
+        if parts[-1] in ('image_raw', 'image_rect', 'image_rect_color', 'image', 'image_color') and len(parts) >= 2:
+            return parts[-2]
+        return parts[-1]
 
     def _prompt_callback(self, msg: String):
         """Update detection prompt."""
@@ -509,7 +847,7 @@ class AIVisionNode(Node):
         """Handle raw image."""
         self.stats['frames_received'] += 1
         
-        if not self._should_process():
+        if not self._should_process(topic):
             return
         
         try:
@@ -522,7 +860,7 @@ class AIVisionNode(Node):
         """Handle compressed image."""
         self.stats['frames_received'] += 1
         
-        if not self._should_process():
+        if not self._should_process(topic):
             return
         
         try:
@@ -533,22 +871,26 @@ class AIVisionNode(Node):
         except Exception as e:
             self.get_logger().error(f'Decode error: {e}')
 
-    def _should_process(self) -> bool:
-        """Check if we should process this frame."""
+    def _should_process(self, topic: str) -> bool:
+        """Per-camera throttle: each topic gets its own `max_fps` budget."""
         if not self.active_client or not self.active_client.is_healthy:
             return False
-        
+
         current_time = time.time()
-        if current_time - self.last_detection_time < self.min_detection_interval:
+        last = self.last_detection_time_per_topic.get(topic, 0.0)
+        if current_time - last < self.min_detection_interval:
             return False
-        
+
+        self.last_detection_time_per_topic[topic] = current_time
         self.last_detection_time = current_time
         return True
 
     def _queue_image(self, cv_image: np.ndarray, header: Header, topic: str):
         """Queue image for processing."""
-        # Resize
-        if self.resize_width > 0 and self.resize_height > 0:
+        # On-device clients (Coral) handle resizing themselves and want full
+        # original resolution so bounding boxes land in the right pixel space.
+        is_local = isinstance(self.active_client, CoralClient)
+        if not is_local and self.resize_width > 0 and self.resize_height > 0:
             cv_image = cv2.resize(
                 cv_image,
                 (self.resize_width, self.resize_height),
@@ -598,21 +940,16 @@ class AIVisionNode(Node):
         """Process single frame."""
         if not self.active_client:
             return None
-        
+
         cv_image = item['image']
-        
-        # Encode image
-        encode_params = [cv2.IMWRITE_JPEG_QUALITY, self.jpeg_quality]
-        _, buffer = cv2.imencode('.jpg', cv_image, encode_params)
-        image_base64 = base64.b64encode(buffer).decode('utf-8')
-        
-        # Detect
-        detections = self.active_client.detect(
-            image_base64,
+
+        detections = self.active_client.detect_image(
+            cv_image,
             prompt=self.prompt,
             box_threshold=self.box_threshold,
             text_threshold=self.text_threshold,
             confidence=self.confidence_threshold,
+            jpeg_quality=self.jpeg_quality,
         )
         
         if detections or self.active_client.is_healthy:
@@ -643,67 +980,51 @@ class AIVisionNode(Node):
 
     def _publish_results(self, result: Dict[str, Any]):
         """Publish detection results."""
-        # JSON detections
         if self.publish_json:
             json_result = {k: v for k, v in result.items() if k != 'cv_image'}
             msg = String()
-            msg.data = json.dumps(json_result)
+            msg.data = json.dumps(json_result, default=_json_default)
             self.detection_pub.publish(msg)
-        
-        # Annotated image
+
         if self.publish_annotated and 'cv_image' in result:
-            annotated = self._draw_detections(result['cv_image'].copy(), result['detections'])
+            src = result.get('source_topic', '')
+            palette_shift = self._palette_shift_by_topic.get(src, self.coral_palette_shift)
+            cam_name = self._topic_names.get(src, src)
+            lat = result.get('latency_ms', 0.0)
+            n = len(result['detections'])
+            fps_txt = f'{1000.0 / max(lat, 0.001):.0f} FPS' if lat > 0 else ''
+            annotated = draw_detection_overlay(
+                result['cv_image'].copy(),
+                result['detections'],
+                palette_shift=palette_shift,
+                latency_ms=0.0,
+                header_top=f'{cam_name}  |  {self._annotate_model_title}  |  palette+{palette_shift}',
+                header_sub=f'detections:{n}  |  {lat:.1f} ms  |  {fps_txt}',
+            )
             try:
                 img_msg = self.cv_bridge.cv2_to_imgmsg(annotated, 'bgr8')
+                src = result.get('source_topic', '')
+                # Preserve incoming frame_id so RViz can place it correctly.
+                hdr = result.get('header', {})
                 img_msg.header.stamp = self.get_clock().now().to_msg()
-                self.annotated_pub.publish(img_msg)
+                img_msg.header.frame_id = hdr.get('frame_id', '')
+                pub = self.annotated_pubs.get(src, self.annotated_pub)
+                pub.publish(img_msg)
             except CvBridgeError:
                 pass
 
-    def _draw_detections(self, image: np.ndarray, detections: List[Dict]) -> np.ndarray:
-        """Draw detections on image."""
-        h, w = image.shape[:2]
-        colors = [(0, 255, 0), (255, 0, 0), (0, 0, 255), (255, 255, 0), (255, 0, 255)]
-        class_colors = {}
-        
-        for det in detections:
-            label = det.get('class_name', 'unknown')
-            conf = det.get('confidence', 0.0)
-            
-            if label not in class_colors:
-                class_colors[label] = colors[len(class_colors) % len(colors)]
-            color = class_colors[label]
-            
-            # Calculate pixel coordinates
-            x1 = int(det.get('bbox_x_norm', 0) * w)
-            y1 = int(det.get('bbox_y_norm', 0) * h)
-            x2 = int((det.get('bbox_x_norm', 0) + det.get('bbox_width_norm', 0)) * w)
-            y2 = int((det.get('bbox_y_norm', 0) + det.get('bbox_height_norm', 0)) * h)
-            
-            cv2.rectangle(image, (x1, y1), (x2, y2), color, 2)
-            
-            text = f'{label}: {conf:.2f}'
-            (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
-            cv2.rectangle(image, (x1, y1 - th - 8), (x1 + tw + 4, y1), color, -1)
-            cv2.putText(image, text, (x1 + 2, y1 - 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-        
-        info = f'Detections: {len(detections)} | {self.prompt[:25]}...'
-        cv2.putText(image, info, (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        
-        return image
-
     def _health_check_all(self):
         """Check health of all servers."""
-        for name, client in self.clients.items():
+        for name, client in self.ai_clients.items():
             is_healthy = client.health_check()
             self.get_logger().debug(f'{name} health: {is_healthy}')
         
         # Select best available client
         for name in ['primary', 'fallback']:
-            if name in self.clients and self.clients[name].is_healthy:
-                if self.active_client != self.clients[name]:
+            if name in self.ai_clients and self.ai_clients[name].is_healthy:
+                if self.active_client != self.ai_clients[name]:
                     self.get_logger().info(f'Switching to {name} server')
-                self.active_client = self.clients[name]
+                self.active_client = self.ai_clients[name]
                 break
 
     def _publish_stats(self):
@@ -718,7 +1039,7 @@ class AIVisionNode(Node):
         status['stats'].pop('latency_samples', None)
         
         msg = String()
-        msg.data = json.dumps(status)
+        msg.data = json.dumps(status, default=_json_default)
         self.status_pub.publish(msg)
 
     def _log_startup(self):
@@ -734,7 +1055,7 @@ class AIVisionNode(Node):
     def destroy_node(self):
         """Cleanup."""
         self.shutdown_flag = True
-        for client in self.clients.values():
+        for client in self.ai_clients.values():
             try:
                 client.session.close()
             except Exception:
